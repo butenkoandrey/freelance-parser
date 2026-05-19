@@ -8,23 +8,59 @@ class FreelanceParser:
     def __init__(self, login, password):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         })
-        self.username = login   # ← переименовали, чтобы не конфликтовать с методом login()
+        self.username = login
         self.password = password
 
-    def do_login(self):         # ← метод переименован
-        resp = self.session.get('https://freelance.ru/login')
+    def do_login(self):
+        # 1. Загружаем страницу логина
+        login_url = 'https://freelance.ru/login'
+        resp = self.session.get(login_url)
+        if resp.status_code != 200:
+            raise Exception(f'Ошибка загрузки страницы логина: {resp.status_code}')
+        
         soup = BeautifulSoup(resp.text, 'html.parser')
-        csrf = soup.find('meta', {'name': 'csrf-token'})['content']
+        
+        # 2. Ищем CSRF-токен (в meta-теге или в скрытом поле формы)
+        csrf = None
+        meta = soup.find('meta', {'name': 'csrf-token'})
+        if meta and meta.get('content'):
+            csrf = meta['content']
+        else:
+            input_csrf = soup.find('input', {'name': '_csrf'})
+            if input_csrf and input_csrf.get('value'):
+                csrf = input_csrf['value']
+        
+        if not csrf:
+            # Если не нашли – сохраняем кусок HTML для диагностики
+            raise Exception(f'CSRF токен не найден. Первые 500 символов ответа:\n{resp.text[:500]}')
+        
+        # 3. Отправляем POST с данными авторизации
+        login_post_url = 'https://freelance.ru/auth/login'
         payload = {
             '_csrf': csrf,
             'LoginForm[email]': self.username,
             'LoginForm[password]': self.password,
-            'LoginForm[rememberMe]': 1
+            'LoginForm[rememberMe]': '1',
         }
-        resp = self.session.post('https://freelance.ru/auth/login', data=payload)
-        return resp.ok
+        headers = {
+            'Referer': login_url,
+            'Origin': 'https://freelance.ru',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+        resp = self.session.post(login_post_url, data=payload, headers=headers)
+        
+        # 4. Проверяем успешность входа (редирект на главную или наличие куки PHPSESSID)
+        if resp.status_code == 302 or 'PHPSESSID' in self.session.cookies:
+            return True
+        else:
+            raise Exception(f'Ошибка авторизации. Статус: {resp.status_code}, тело: {resp.text[:200]}')
 
     def parse_page(self, page_num=1):
         url = f'https://freelance.ru/project/search?page={page_num}'
@@ -61,8 +97,8 @@ class FreelanceParser:
             })
         return projects
 
-    def run(self, max_pages=5):
-        self.do_login()          # ← вызываем метод, а не строку
+    def run(self, max_pages=3):
+        self.do_login()
         new_count = 0
         for page in range(1, max_pages + 1):
             print(f'Парсинг страницы {page}...')
