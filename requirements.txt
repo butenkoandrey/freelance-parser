@@ -4,4 +4,5 @@ beautifulsoup4==4.12.2
 psycopg2-binary==2.9.9
 gunicorn==21.2.0
 python-dotenv==1.0.1
-cloudscraper==1.2.71
+cloudscraper-enhanced==3.0.0
+curl_cffi==0.7.1
