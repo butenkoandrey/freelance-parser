@@ -1,72 +1,107 @@
+# parser.py
 import re
+import time
 import cloudscraper
 from bs4 import BeautifulSoup
-from time import sleep
 from models import db, Project
 
 class FreelanceParser:
     def __init__(self, login, password):
-        # cloudscraper создаёт сессию, которая обходит Cloudflare
-        self.session = cloudscraper.create_scraper()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+        self.username = login
+        self.password = password
+        # Создаём сессию с расширенными настройками для обхода Cloudflare
+        self.session = self._create_session()
+
+    def _create_session(self):
+        """Создаёт сессию cloudscraper с эмуляцией реального браузера"""
+        scraper = cloudscraper.create_scraper(
+            interpreter='nodejs',          # используем Node.js для выполнения JS (если доступен)
+            delay=15,                      # задержка перед запросом (имитация человека)
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'mobile': False,
+                'desktop': True
+            }
+        )
+        # Полный набор заголовков, как у реального Chrome
+        scraper.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         })
-        self.username = login
-        self.password = password
+        return scraper
 
-    def do_login(self):
-        # 1. Получаем страницу логина
-        login_url = 'https://freelance.ru/login'
-        resp = self.session.get(login_url)
-        if resp.status_code != 200:
-            raise Exception(f'Ошибка загрузки страницы логина: {resp.status_code}')
-        
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # 2. Ищем CSRF-токен
-        csrf = None
-        meta = soup.find('meta', {'name': 'csrf-token'})
-        if meta and meta.get('content'):
-            csrf = meta['content']
-        else:
-            input_csrf = soup.find('input', {'name': '_csrf'})
-            if input_csrf and input_csrf.get('value'):
-                csrf = input_csrf['value']
-        
-        if not csrf:
-            raise Exception(f'CSRF токен не найден. Первые 500 символов:\n{resp.text[:500]}')
-        
-        # 3. Отправляем POST-запрос для входа
-        login_post_url = 'https://freelance.ru/auth/login'
-        payload = {
-            '_csrf': csrf,
-            'LoginForm[email]': self.username,
-            'LoginForm[password]': self.password,
-            'LoginForm[rememberMe]': '1',
-        }
-        headers = {
-            'Referer': login_url,
-            'Origin': 'https://freelance.ru',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
-        resp = self.session.post(login_post_url, data=payload, headers=headers)
-        
-        # 4. Проверяем успешность входа
-        if resp.status_code == 302 or 'PHPSESSID' in self.session.cookies:
-            return True
-        else:
-            raise Exception(f'Ошибка авторизации. Статус: {resp.status_code}')
+    def do_login(self, retries=3):
+        """Авторизация на сайте с повторными попытками"""
+        for attempt in range(retries):
+            try:
+                # 1. Загружаем страницу входа
+                login_url = 'https://freelance.ru/login'
+                resp = self.session.get(login_url, timeout=30)
+                if resp.status_code != 200:
+                    raise Exception(f'HTTP {resp.status_code} при загрузке страницы логина')
+
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                
+                # 2. Ищем CSRF-токен
+                csrf = None
+                meta = soup.find('meta', {'name': 'csrf-token'})
+                if meta and meta.get('content'):
+                    csrf = meta['content']
+                else:
+                    input_csrf = soup.find('input', {'name': '_csrf'})
+                    if input_csrf and input_csrf.get('value'):
+                        csrf = input_csrf['value']
+
+                if not csrf:
+                    # Возможно, Cloudflare ещё не пропустил – пробуем снова
+                    raise Exception('CSRF токен не найден. Возможно, страница ещё не загрузилась.')
+
+                # 3. Отправляем POST-запрос с данными формы
+                login_post_url = 'https://freelance.ru/auth/login'
+                payload = {
+                    '_csrf': csrf,
+                    'LoginForm[email]': self.username,
+                    'LoginForm[password]': self.password,
+                    'LoginForm[rememberMe]': '1',
+                }
+                headers = {
+                    'Origin': 'https://freelance.ru',
+                    'Referer': login_url,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                }
+                time.sleep(2)  # небольшая пауза перед отправкой
+                resp = self.session.post(login_post_url, data=payload, headers=headers, timeout=30)
+
+                # 4. Проверяем успешность входа
+                if resp.status_code == 302 or 'PHPSESSID' in self.session.cookies:
+                    return True
+                else:
+                    raise Exception(f'Не удалось войти. Статус: {resp.status_code}')
+            
+            except Exception as e:
+                print(f'Попытка {attempt+1} из {retries} не удалась: {e}')
+                if attempt < retries - 1:
+                    time.sleep(5)  # ждём перед повторной попыткой
+                else:
+                    raise Exception(f'Не удалось авторизоваться после {retries} попыток: {e}')
 
     def parse_page(self, page_num=1):
+        """Парсинг одной страницы с проектами"""
         url = f'https://freelance.ru/project/search?page={page_num}'
-        resp = self.session.get(url)
+        resp = self.session.get(url, timeout=30)
         soup = BeautifulSoup(resp.text, 'html.parser')
         projects = []
+
         for card in soup.select('.project-item-default-card'):
             link_tag = card.select_one('.title a')
             if not link_tag:
@@ -86,6 +121,7 @@ class FreelanceParser:
             category = category_tag.get_text(strip=True) if category_tag else ''
             time_tag = card.select_one('.publish-time time')
             published = time_tag['datetime'] if time_tag and time_tag.get('datetime') else None
+
             projects.append({
                 'project_id': int(project_id),
                 'title': title,
@@ -98,6 +134,7 @@ class FreelanceParser:
         return projects
 
     def run(self, max_pages=3):
+        """Запуск парсинга: авторизация + обход страниц + сохранение новых проектов"""
         self.do_login()
         new_count = 0
         for page in range(1, max_pages + 1):
@@ -110,5 +147,5 @@ class FreelanceParser:
                     db.session.add(proj)
                     new_count += 1
             db.session.commit()
-            sleep(2)
+            time.sleep(2)  # пауза между запросами
         return new_count
