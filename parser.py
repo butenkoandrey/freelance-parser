@@ -1,12 +1,13 @@
 import re
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from time import sleep
 from models import db, Project
 
 class FreelanceParser:
     def __init__(self, login, password):
-        self.session = requests.Session()
+        # cloudscraper создаёт сессию, которая обходит Cloudflare
+        self.session = cloudscraper.create_scraper()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -19,7 +20,7 @@ class FreelanceParser:
         self.password = password
 
     def do_login(self):
-        # 1. Загружаем страницу логина
+        # 1. Получаем страницу логина
         login_url = 'https://freelance.ru/login'
         resp = self.session.get(login_url)
         if resp.status_code != 200:
@@ -27,7 +28,7 @@ class FreelanceParser:
         
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # 2. Ищем CSRF-токен (в meta-теге или в скрытом поле формы)
+        # 2. Ищем CSRF-токен
         csrf = None
         meta = soup.find('meta', {'name': 'csrf-token'})
         if meta and meta.get('content'):
@@ -38,10 +39,9 @@ class FreelanceParser:
                 csrf = input_csrf['value']
         
         if not csrf:
-            # Если не нашли – сохраняем кусок HTML для диагностики
-            raise Exception(f'CSRF токен не найден. Первые 500 символов ответа:\n{resp.text[:500]}')
+            raise Exception(f'CSRF токен не найден. Первые 500 символов:\n{resp.text[:500]}')
         
-        # 3. Отправляем POST с данными авторизации
+        # 3. Отправляем POST-запрос для входа
         login_post_url = 'https://freelance.ru/auth/login'
         payload = {
             '_csrf': csrf,
@@ -56,11 +56,11 @@ class FreelanceParser:
         }
         resp = self.session.post(login_post_url, data=payload, headers=headers)
         
-        # 4. Проверяем успешность входа (редирект на главную или наличие куки PHPSESSID)
+        # 4. Проверяем успешность входа
         if resp.status_code == 302 or 'PHPSESSID' in self.session.cookies:
             return True
         else:
-            raise Exception(f'Ошибка авторизации. Статус: {resp.status_code}, тело: {resp.text[:200]}')
+            raise Exception(f'Ошибка авторизации. Статус: {resp.status_code}')
 
     def parse_page(self, page_num=1):
         url = f'https://freelance.ru/project/search?page={page_num}'
